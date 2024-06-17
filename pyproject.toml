@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "operator-deep-smoothing-for-implied-volatility"
+version = "0.1.0"
+description = "Operator Deep Smoothing for Implied Volatility"
+authors = ["Ruben Wiedemann <r.wiedemann22@imperial.ac.uk>"]
+license = "MIT"
+readme = "README.md"
+packages = [
+    { include = "volatility_smoothing/**/*.py" }
+]
+
+[tool.poetry.dependencies]
+python = "~3.11"
+torch = "^2.3.1"
+torch-geometric = "^2.5.3"
+numpy = "1.26"
+matplotlib = "^3.9.0"
+scipy = "^1.13.1"
+py-vollib-vectorized = "^0.1.1"
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.29.4"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -2,6 +2,8 @@ from dataclasses import dataclass, astuple
 import numpy as np
 from scipy.optimize import minimize
 
+from volatility_smoothing.utils import black_scholes, local_volatility
+
 
 @dataclass
 class SVI:

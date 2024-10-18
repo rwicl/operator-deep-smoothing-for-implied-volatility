@@ -7,8 +7,11 @@ Code components used to produce the results of the paper in the context of impli
 
 ## Installation
 
-Simply pip-install from the repository root.
-The IPython kernel dependency is included in the pip install extra group `dev`.
+Simply pip-install to your environment (in editable mode) from the repository root:
+```shell
+(venv) ➜ pip install -e .
+```
 
+To run the notebooks, additionally install your favorite Jupyter version.
 
 [^1]: Kovachki, N., Li, Z., Liu, B., Azizzadenesheli, K., Bhattacharya, K., Stuart, A., and Anandkumar A., “Neural Operator: Learning Maps Between Function Spaces”, JMLR, 2021. doi:10.48550/arXiv.2108.08481.

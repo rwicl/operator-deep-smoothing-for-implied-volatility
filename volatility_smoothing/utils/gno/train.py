@@ -2,21 +2,26 @@ from typing import Optional
 from random import uniform
 from pathlib import Path
 from dataclasses import dataclass, field
+from itertools import zip_longest, chain
 
 import torch
 from torch import Tensor
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList
 from torch.utils.data import DataLoader
+from torch_geometric.data import Data
 from torch.distributions.normal import Normal
-
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from op_ds.utils.grid import RectilinearGrid
+from op_ds.gno.gno import GNO
 from volatility_smoothing.utils import arbitrage, errors, black_scholes
 from volatility_smoothing.utils.data import OptionsDataset
-from volatility_smoothing.utils.edge_index import generate_edge_index
+from volatility_smoothing.utils.gno.edge_index import generate_edge_index
+from volatility_smoothing.utils.svi import SVI
+from volatility_smoothing.utils.slice_data import slice_data
 
 
 normal = Normal(0., 1.)
@@ -175,6 +180,8 @@ class Trainer:
         rows_val = []
         rows_rel = []
         rows_fit = []
+
+        data_list = []
         for data, input, aux in dataloader:
 
             data = data.to(device)
@@ -205,6 +212,7 @@ class Trainer:
             data.implied_density = normal.log_prob(-d2).exp() * g / (iv_surface * grid['r'])
             data.replication_error, data.butterfly_error, data.calendar_error, data.div_dzz, data.div_drr = self.errors(data, output, aux)
             data.grid = grid
+            data_list.append(data)
 
             if data_storedir is not None:
                 filepath = f"{data_storedir}/data_{data.quote_datetime.strftime('%Y-%m-%d-%H-%M-%S')}.pt"
@@ -223,8 +231,68 @@ class Trainer:
             df_rel.to_csv(f"{storedir}/rel_{start}-{end}.csv")
             df_fit.to_csv(f"{storedir}/fit_{start}-{end}.csv")
 
-        return df_val, df_rel, df_fit
+        return df_val, df_rel, df_fit, data_list
 
     def collate_fn(self, data_list):
         data = data_list[0]
         return (data, *self.load_input(data))
+    
+    def plot_example(self, model: GNO, data: Data, nrows: int, ncols: int, step: int = 3, **kwargs):
+
+        figsize = kwargs.get('figsize', (9, 14))
+
+        grid = RectilinearGrid(r=data.r.unique(), z=torch.arange(-1.5, .5, 0.01))
+        pos_y = grid.flatten('channel_last')
+        pos_x = torch.cat((data['r'], data['z']), dim=1)
+        edge_index = generate_edge_index(pos_x, pos_y, subsample_size=self.subsample_size, radius=self.radius)
+
+        input = {
+            'x': data['implied_volatility'],
+            'pos_x': pos_x,
+            'pos_y': pos_y,
+            'edge_index': edge_index
+        }
+
+        aux = {
+            'sections': [np.prod(grid.size())],
+            'grids': [grid],
+        }
+
+        with torch.no_grad():
+            output = model(**input)
+        iv_predict, iv_gno = self.read_output(output, aux)    
+    
+        expiries, slices = slice_data(data['r'], data['z'], data['implied_volatility'], iv_predict, data['vega'])
+
+        fig, axs = plt.subplots(nrows, ncols, figsize=figsize, sharex=True)
+        for i, ax in zip_longest(range(len(expiries)), chain(*axs)):
+            if i is None:
+                fig.delaxes(ax)
+            else:
+                r, z, iv_target, iv_predict, weight= slices[i]
+                svi = SVI().fit({'r': r.numpy(), 'z': z.numpy(), 'implied_volatility': iv_target.numpy(), 'weight': weight})
+                iv_svi = SVI.implied_volatility(z, *svi)
+            
+                z_plot = np.arange(-1.5, .5, 0.01)
+                iv_svi = SVI.implied_volatility(z_plot, *svi)
+
+                ax.scatter(z[::step], iv_target[::step], c='b', alpha=.5, s=8, marker='+', label='Mkt')
+                ax.plot(z_plot, iv_svi, c='orange', alpha=.5, label='SVI')
+                ax.plot(z_plot, iv_gno[i], c='g', alpha=.5, label='OpDS')
+                ax.set_title(rf"$\tau={r[0]**2:.3f}$")
+                ax.set_xlabel(r"$z = k / \sqrt{\tau}$")
+                ax.legend()
+                ax.grid()
+                ax.set_aspect('auto')
+
+        for col in range(ncols):
+            last_ax = None
+            for row in range(nrows):
+                # check if matplotlib ax has been deleted:
+                if not repr(axs[row, col]) == '<Axes: >':
+                    last_ax = axs[row, col]
+                else:
+                    last_ax.xaxis.set_tick_params(labelbottom=True)
+                    break
+
+        return fig, axs

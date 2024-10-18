@@ -18,7 +18,7 @@ import pandas as pd
 from op_ds.utils.grid import RectilinearGrid
 from op_ds.gno.gno import GNO
 from volatility_smoothing.utils import arbitrage, errors, black_scholes
-from volatility_smoothing.utils.data import OptionsDataset
+from volatility_smoothing.utils.options_data import OptionsDataset
 from volatility_smoothing.utils.gno.edge_index import generate_edge_index
 from volatility_smoothing.utils.svi import SVI
 from volatility_smoothing.utils.slice_data import slice_data

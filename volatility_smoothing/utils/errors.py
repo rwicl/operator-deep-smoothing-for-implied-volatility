@@ -6,18 +6,18 @@ from py_vollib_vectorized import vectorized_black_scholes
 
 
 def spread_error(iv_predict: np.ndarray, data: Mapping[str, np.ndarray]) -> dict[str, float]:
-    K = np.exp(data['log_moneyness']).squeeze()
+    K = np.exp(np.asarray(data['log_moneyness'])).squeeze()
     S = np.ones_like(K)
     r = np.zeros_like(K)
-    t = data['time_to_maturity'].squeeze()
+    t = np.asarray(data['time_to_maturity']).squeeze()
     flag = ['c' if K >= 1 else 'p' for K in K]
 
-    iv = iv_predict.squeeze()
-    df = data['discount_factor'].squeeze()
-    fw = data['underlying_forward'].squeeze()
+    iv = np.asarray(iv_predict).squeeze()
+    df = np.asarray(data['discount_factor']).squeeze()
+    fw = np.asarray(data['underlying_forward']).squeeze()
     mid_predict = df * fw * vectorized_black_scholes(flag, S, K, t, r, iv, return_as='array')
-    mid = ((data['bid'] + data['ask']) / 2).squeeze()
-    spread = ((data['ask'] - data['bid']) / 2).squeeze()
+    mid = np.asarray(((data['bid'] + data['ask']) / 2)).squeeze()
+    spread = np.asarray(((data['ask'] - data['bid']) / 2)).squeeze()
 
     spread_error = np.abs((mid_predict - mid)) / spread
 

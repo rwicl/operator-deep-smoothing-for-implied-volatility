@@ -69,7 +69,7 @@ class OptionsDataset(Dataset, ABC):
                           .sort_index())
             self.quote_datetimes = self._data.index.get_level_values('quote_datetime').unique()
         else:
-            self._data = [os.path.join(cache_dir, filename) for filename in os.listdir(cache_dir)]
+            self._data = [os.path.join(cache_dir, filename) for filename in os.listdir(cache_dir) if filename.endswith(f".{return_as}")]
             self.quote_datetimes = pd.DatetimeIndex([self._get_quote_datetime(file) for file in self._data], name='quote_datetime')
 
         self.return_as = return_as
@@ -114,7 +114,7 @@ class OptionsDataset(Dataset, ABC):
         # Load surface
         if isinstance(self._data, list):
             if self.return_as == 'pt':
-                surface = torch.load(self._data[i])
+                surface = torch.load(self._data[i], weights_only=True)
             elif self.return_as == 'csv':
                 surface = pd.read_csv(self._data[i])
         elif isinstance(self._data, pd.DataFrame):

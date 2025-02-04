@@ -17,10 +17,12 @@ numpy = "1.26"
 matplotlib = "^3.9.0"
 scipy = "^1.13.1"
 py-vollib-vectorized = "^0.1.1"
+tensordict = "^0.6.2"
 
 [tool.poetry.group.dev.dependencies]
 ipykernel = "^6.29.4"
 scienceplots = "^2.1.1"
+nbconvert = "^7.16.4"
 
 [build-system]
 requires = ["poetry-core"]

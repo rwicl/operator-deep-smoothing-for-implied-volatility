@@ -71,7 +71,7 @@ class OptionsDataset(Dataset, ABC):
 
         if not cache_dir.exists() or force_reprocess:
             cache_dir.mkdir(parents=True, exist_ok=True)
-            data = (self
+            df = (self
                     .load_data()
                     .dropna(subset=['expiry_datetime', 'quote_datetime', 'strike', 'option_type', 'bid', 'ask'])
                     .astype({'quote_datetime': 'datetime64[ns]',
@@ -83,7 +83,7 @@ class OptionsDataset(Dataset, ABC):
                     .pipe(self.add_implieds)
                     .get(self.columns)
                     .sort_index())
-            self._cache_data(data, cache_dir)
+            self._cache_data(df, cache_dir)
         
         log.info("Assembling and sorting index of cached files.")
         self.file_paths = sorted(cache_dir.glob(f"{self.__class__.__name__}_*.pt"))
@@ -122,14 +122,14 @@ class OptionsDataset(Dataset, ABC):
         return torch.load(self.file_paths[i])
         
     def _get_quote_datetime(self, filepath):
-        date_string = filepath.split(f'{type(self).__name__}_')[1].split('.')[0]
+        date_string = str(filepath).split(f'{type(self).__name__}_')[1].split('.')[0]
         quote_datetime = datetime.strptime(date_string, '%Y-%m-%d-%H-%M-%S')
         return quote_datetime
 
-    def _cache_data(self, data: pd.DataFrame, cache_dir: Optional[str] = None) -> None:
-        quote_datetimes = data.index.get_level_values('quote_datetime').unique()
+    def _cache_data(self, df: pd.DataFrame, cache_dir: Optional[str] = None) -> None:
+        quote_datetimes = df.index.get_level_values('quote_datetime').unique()
         for i, quote_datetime in enumerate(quote_datetimes):
-            data = data.xs(quote_datetime, level='quote_datetime')
+            data = df.xs(quote_datetime, level='quote_datetime')
             datestr = quote_datetime.strftime("%Y-%m-%d-%H-%M-%S")
             filepath = os.path.join(cache_dir, f"{type(self).__name__}_{datestr}.pt")
             torch.save(data, filepath)
@@ -219,3 +219,9 @@ class SPXOptionsDataset(OptionsDataset):
         
         return df
 
+
+
+if __name__ == "__main__":
+    os.environ['OPDS_CACHE_DIR'] = "/Users/ruben/.cache/opds"
+    os.environ['OPDS_CBOE_SPX_DATA_DIR'] = "/Users/ruben/data/cboe/subsample"
+    dataset = SPXOptionsDataset(force_reprocess=True)

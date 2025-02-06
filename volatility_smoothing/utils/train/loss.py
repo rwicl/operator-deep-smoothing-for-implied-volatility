@@ -156,7 +156,7 @@ class Loss:
                         
             return l, {'loss': l, 'mape': mape, 'wmape': weighted_mape} | losses
 
-    def compute_batch_loss(self, model: Module, batch: list[tuple[Data, TensorDict, TensorDict]], its, callback: callable, device: torch.device = None):
+    def compute_batch_loss(self, model: Module, batch: list[tuple[Data, TensorDict, TensorDict]], callback: callable, device: torch.device = None):
         
         batch_loss = 0
         loss_infos = []

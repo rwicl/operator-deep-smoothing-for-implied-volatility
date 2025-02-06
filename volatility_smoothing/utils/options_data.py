@@ -9,7 +9,7 @@ import logging
 
 import numpy as np
 import pandas as pd
-import py_vollib_vectorized
+from py_vollib_vectorized import vectorized_implied_volatility
 
 import torch
 from torch.utils.data import Dataset
@@ -80,9 +80,21 @@ class OptionsDataset(Dataset, ABC):
                             'option_type': 'str',
                             'bid': float,
                             'ask': float})
-                    .pipe(self.add_implieds)
+                    .pipe(self.add_time_to_maturity)
+                    .pipe(self.add_mid)
+                    .set_index(['quote_datetime', 'expiry_datetime', 'strike'])
+                    .sort_index()
+                    .get([
+                        'option_type',
+                        'time_to_maturity',
+                        'mid',
+                        'bid',
+                        'ask'
+                    ])
+                    .pipe(self.add_forward, drop_otm=True)
+                    .pipe(self.add_implied_volatility)
                     .get(self.columns)
-                    .sort_index())
+                    .dropna())
             self._cache_data(df, cache_dir)
         
         log.info("Assembling and sorting index of cached files.")
@@ -129,39 +141,45 @@ class OptionsDataset(Dataset, ABC):
     def _cache_data(self, df: pd.DataFrame, cache_dir: Optional[str] = None) -> None:
         quote_datetimes = df.index.get_level_values('quote_datetime').unique()
         for i, quote_datetime in enumerate(quote_datetimes):
-            data = df.xs(quote_datetime, level='quote_datetime')
+            surface = df.xs(quote_datetime, level='quote_datetime')
+            surface = surface.reset_index(drop=True)
+            surface = torch.tensor(surface.values.T, dtype=torch.float32)
             datestr = quote_datetime.strftime("%Y-%m-%d-%H-%M-%S")
             filepath = os.path.join(cache_dir, f"{type(self).__name__}_{datestr}.pt")
-            torch.save(data, filepath)
+            torch.save(surface, filepath)
 
     @property
     def columns(self):
-        return ['option_type', 'time_to_maturity', 'log_moneyness', 'implied_volatility', 'bid', 'ask', 'discount_factor', 'underlying_forward']
+        return ['time_to_maturity', 'log_moneyness', 'implied_volatility', 'bid', 'ask', 'discount_factor', 'underlying_forward']
 
     @staticmethod
-    def add_implieds(df):
+    def add_time_to_maturity(df: pd.DataFrame) -> pd.DataFrame:
+        """Adds `time_to_maturity` column to dataframe
         
-        df = (df
-            .assign(
-                time_to_maturity=lambda df: ((df['expiry_datetime'] - df['quote_datetime']).dt.total_seconds()) / (365 * 24 * 60 * 60),  # 252 <- 252 counting seems to be wrong
-                mid=lambda df: (df['bid'] + df['ask']) / 2,
-            )
-            .query('time_to_maturity > 0')  # drop time_to_maturity == 0
-            .set_index(['quote_datetime', 'expiry_datetime', 'strike'])
-            .pivot(columns='option_type')
-            .get([
-                'time_to_maturity',
-                'mid',
-                'bid',
-                'ask'
-            ])
-        )
-        # Throw away any quote which somewhere have underlying zero-price! Mus
-        #idx = (df['underlying_bid'].groupby(level='quote_datetime').min() > 0).all(axis=1)  # Do not allow any underlying bid to be zero
-        #idx =  & (data['ask'].groupby(level=['quote_datetime', 'expiration']).min() > 0).all(axis=1))
-        #idx = ((description.loc[:, ('underlying_bid', slice(None), 'min')] > 0).all(axis=1))  # Do not allow any underlying bid to be zero
-        #      # & (description.loc[:, ('ask', slice(None), 'max')] > 0).all(axis=1))  # Only take where there is a non-zero ask
-        # df = df[idx.reindex(df.index, level='quote_datetime')].copy()
+        Compute time-to-expiry based on 365-daycount.
+        """
+        df['time_to_maturity'] = (df['expiry_datetime'] - df['quote_datetime']).dt.total_seconds() / (365 * 24 * 60 * 60)
+        df = df.query('time_to_maturity > 0')  # drop time_to_maturity == 0
+        return df
+
+    @staticmethod
+    def add_mid(df: pd.DataFrame) -> pd.DataFrame:
+        """Adds `mid` column to dataframe
+        
+        Compute *simple* mid, the average of bid and ask.
+        """
+        df['mid'] = (df['bid'] + df['ask']) / 2
+        df = df.query('mid > 0')  # discards zero-ask options
+        return df
+
+    @staticmethod
+    def add_forward(df: pd.DataFrame, drop_otm=True) -> pd.DataFrame:
+        """Adds `discount_factor`, `underlying_forward`, `log_moneyness` to dataframe
+        
+        Based on pandas `apply`-method for grouped datarfames, which is slow.
+        Might want to hardcode the linear regression...
+        """
+        df = df.pivot(columns='option_type')
 
         borrow = df.groupby(['quote_datetime', 'expiry_datetime']).apply(imply_borrow)
 
@@ -172,24 +190,31 @@ class OptionsDataset(Dataset, ABC):
         df['log_moneyness', 'C'] = np.log(df.index.get_level_values('strike') / df['underlying_forward', 'C'])
         df['log_moneyness', 'P'] = np.log(df.index.get_level_values('strike') / df['underlying_forward', 'P'])
         
-        S = df['underlying_forward', 'C'].values
+        calls = df.xs('C', axis=1, level='option_type')
+        puts = df.xs('P', axis=1, level='option_type')
+
+        if drop_otm:
+            calls = calls.loc[calls['log_moneyness'] > 0]
+            puts = puts.loc[puts['log_moneyness'] <= 0]
+
+        df = pd.concat((calls, puts)).sort_index()
+
+        return df
+    
+    @staticmethod
+    def add_implied_volatility(df: pd.DataFrame) -> pd.DataFrame:
+        """Add `implied_volatility_mid`, `implied_volatility_bid`, `implied_volatility_ask` to dataframe
+
+        Based on vectorized implementation of P. Jäckels "Let's be rational" method for computing implied volatility, available as `py_vollib_vectorized` in PyPI.
+        Can be a bit tricky to install sometimes...
+        """
+        S = df['underlying_forward'].values
         K = df.index.get_level_values('strike').values
-        t = df['time_to_maturity', 'C'].values
+        t = df['time_to_maturity'].values
         r = np.zeros_like(t) #(- np.log(df['discount_factor']) / t).values
         flag = np.full(r.shape, fill_value='c')
-        df['implied_volatility', 'C'] = py_vollib_vectorized.vectorized_implied_volatility(df['mid', 'C'].values, S, K, t, r, flag, return_as='array')
-
-        S = df['underlying_forward', 'P'].values
-        K = df.index.get_level_values('strike').values
-        t = df['time_to_maturity', 'P'].values
-        r = np.zeros_like(t) #(- np.log(df['discount_factor']) / t).values
-        flag = np.full(r.shape, fill_value='p')
-        df['implied_volatility', 'P'] = py_vollib_vectorized.vectorized_implied_volatility(df['mid', 'P'].values, S, K, t, r, flag, return_as='array')
-        df = df.swaplevel(axis=1)
-
-        calls = df['C'].assign(option_type=1.)
-        puts = df['P'].assign(option_type=-1.)
-        df = pd.concat((calls, puts))
+        flag[df['log_moneyness'] <= 0] = 'p'
+        df['implied_volatility'] = vectorized_implied_volatility(df['mid'].values, S, K, t, r, flag, return_as='array')
 
         return df
 
@@ -219,9 +244,3 @@ class SPXOptionsDataset(OptionsDataset):
         
         return df
 
-
-
-if __name__ == "__main__":
-    os.environ['OPDS_CACHE_DIR'] = "/Users/ruben/.cache/opds"
-    os.environ['OPDS_CBOE_SPX_DATA_DIR'] = "/Users/ruben/data/cboe/subsample"
-    dataset = SPXOptionsDataset(force_reprocess=True)

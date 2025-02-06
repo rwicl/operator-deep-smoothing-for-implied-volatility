@@ -34,14 +34,13 @@ class GNOOptionsDataset(Dataset):
         self.subsample = subsample
         if mapping is None:
             mapping = {
-                'option_type': 0,
-                'time_to_maturity': 1,
-                'log_moneyness': 2,
-                'implied_volatility': 3,
-                'bid': 4,
-                'ask': 5,
-                'discount_factor': 6,
-                'underlying_forward': 7
+                'time_to_maturity': 0,
+                'log_moneyness': 1,
+                'implied_volatility': 2,
+                'bid': 3,
+                'ask': 4,
+                'discount_factor': 5,
+                'underlying_forward': 6
             }
         self.mapping = mapping
 
@@ -52,14 +51,6 @@ class GNOOptionsDataset(Dataset):
         
         quote_datetime = self.options_dataset.quote_datetimes[i]
         raw_data = self.options_dataset[i]
-
-        option_type_idx = self.mapping['option_type']
-        log_moneyness_idx = self.mapping['log_moneyness']
-        call_idx = (raw_data[option_type_idx] == 1) & (raw_data[log_moneyness_idx] > 0)
-        put_idx = (raw_data[option_type_idx] == -1) & (raw_data[log_moneyness_idx] <= 0)
-        nan_idx = ~raw_data.isnan().any(dim=0)
-
-        raw_data = raw_data[list(self.mapping.values())][:, (call_idx | put_idx) & nan_idx]
         
         if self.subsample:
             subsample_idx = torch.rand(raw_data.size(1)) <= uniform(0.6, 1.2)

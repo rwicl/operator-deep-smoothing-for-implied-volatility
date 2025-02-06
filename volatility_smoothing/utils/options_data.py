@@ -4,6 +4,8 @@ import os
 import re
 from datetime import datetime
 import warnings
+from pathlib import Path
+import logging
 
 import numpy as np
 import pandas as pd
@@ -12,6 +14,8 @@ import py_vollib_vectorized
 import torch
 from torch.utils.data import Dataset
 
+
+log = logging.getLogger(__name__)
 
 def imply_borrow(x: pd.DataFrame, k: int = 3, atm_bound: Optional[float] = None) -> pd.Series:
     if atm_bound is None:
@@ -37,42 +41,54 @@ def imply_borrow(x: pd.DataFrame, k: int = 3, atm_bound: Optional[float] = None)
 
 
 class OptionsDataset(Dataset, ABC):
-    """Options datasets base class
+    """Base class for options datasets
+    
+    Implement this class to add custom datasets.
+    To do so, implement the abstract :meth:`~volformer.data.base.DatasetBase.download`-method.
+    Then, upon initialization, the dataset will automatically download the data, process it (computing time-to-expiry, mid, forward, discount factor, implied volatility, ...), and cache it.
+    The data is cached in the directory specified by the `OPDS_CACHE_DIR` environment variable (in a subdirectory named after the dataset class), and reprocessed only if the cache is not found or if the `force_reprocess` init-flag is set to `True`.
+    This means that the dataset shouldn't really have a configurable initialization, since the reprocessing must be triggered manually.
+    Required per-user information should be pulled from environment variables.
     """
     
-    def __init__(self, data_dir: Optional[str] = None, cache_dir: Optional[str] = None, return_as: Literal['csv', 'pt'] = 'pt') -> None:
-        """Create options dataset from either raw data or previously processed (cached) data
 
-        If not providing ``data_dir`` during init, then must provide ``cache_dir`` (to populate a ``cache_dir`` use ).
+    def __init__(self, force_reprocess: bool = False) -> None:
+        """Initialize dataset
+
+        Makes sure cache of processed files exists (just checks existence of respective directory).
+        If it doesn't, creates it by invoking :meth:`load_data`, processing the data, and then writing one file per surface to the cache.
+        Once initialized, surfaces are loaded on the fly from the cache, one-by-one per access.
 
         Parameters
         ----------
-        data_dir, optional
-            Directory from which to load the raw data, by default None
-        cache_dir, optional
-            Cache directory, where to cache or load processed data from, by default None
-        return_as, optional
-            Format to return data in, by default 'pt'
+        force_reprocess : bool, optional
+            If True, reprocess data even if cache exists. By default `False`.
         """
-        if data_dir is not None:
-            self._data = (self
-                          .load_data(data_dir)
-                          .dropna(subset=['expiry_datetime', 'quote_datetime', 'strike', 'option_type', 'bid', 'ask'])
-                          .astype({'quote_datetime': 'datetime64[ns]',
-                                    'expiry_datetime': 'datetime64[ns]',
-                                    'strike': float,
-                                    'option_type': 'str',
-                                    'bid': float,
-                                    'ask': float})
-                          .pipe(self.add_implieds)
-                          .get(self.columns)
-                          .sort_index())
-            self.quote_datetimes = self._data.index.get_level_values('quote_datetime').unique()
-        else:
-            self._data = [os.path.join(cache_dir, filename) for filename in os.listdir(cache_dir) if filename.endswith(f".{return_as}")]
-            self.quote_datetimes = pd.DatetimeIndex([self._get_quote_datetime(file) for file in self._data], name='quote_datetime')
 
-        self.return_as = return_as
+        if os.getenv("OPDS_CACHE_DIR") is None:
+            raise ValueError("OPDS_CACHE_DIR environment variable not set")
+        cache_dir = Path(os.getenv("OPDS_CACHE_DIR")) / self.__class__.__name__
+
+        if not cache_dir.exists() or force_reprocess:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            data = (self
+                    .load_data()
+                    .dropna(subset=['expiry_datetime', 'quote_datetime', 'strike', 'option_type', 'bid', 'ask'])
+                    .astype({'quote_datetime': 'datetime64[ns]',
+                            'expiry_datetime': 'datetime64[ns]',
+                            'strike': float,
+                            'option_type': 'str',
+                            'bid': float,
+                            'ask': float})
+                    .pipe(self.add_implieds)
+                    .get(self.columns)
+                    .sort_index())
+            self._cache_data(data, cache_dir)
+        
+        log.info("Assembling and sorting index of cached files.")
+        self.file_paths = sorted(cache_dir.glob(f"{self.__class__.__name__}_*.pt"))
+        self.quote_datetimes = pd.DatetimeIndex([self._get_quote_datetime(file) for file in self.file_paths], name='quote_datetime')
+        log.info(f"Created index of {len(self.file_paths)} files.")
 
     @classmethod
     @abstractmethod
@@ -103,43 +119,21 @@ class OptionsDataset(Dataset, ABC):
         return len(self.quote_datetimes)
     
     def __getitem__(self, i: int):
-        return self.get_surface(i, return_as=self.return_as)
+        return torch.load(self.file_paths[i])
         
     def _get_quote_datetime(self, filepath):
         date_string = filepath.split(f'{type(self).__name__}_')[1].split('.')[0]
         quote_datetime = datetime.strptime(date_string, '%Y-%m-%d-%H-%M-%S')
         return quote_datetime
 
-    def get_surface(self, i: int, return_as: Literal['pt', 'csv']) -> pd.DataFrame:
-        # Load surface
-        if isinstance(self._data, list):
-            if self.return_as == 'pt':
-                surface = torch.load(self._data[i], weights_only=True)
-            elif self.return_as == 'csv':
-                surface = pd.read_csv(self._data[i])
-        elif isinstance(self._data, pd.DataFrame):
-            surface = self._data.xs(self.quote_datetimes[i], level='quote_datetime')
-            if return_as == 'pt':
-                # surface['option_type'] = surface['option_type'].map({'C': 1., 'P': -1.})
-                surface = surface.reset_index(drop=True)
-                surface = torch.tensor(surface.values.T, dtype=torch.float32)
-        else:
-            raise ValueError("Unknown data type")
-        
-        return surface
-
-    def cache_data(self, cache_dir: Optional[str] = None) -> None:
-        for i, quote_datetime in enumerate(self.quote_datetimes):
-            data = self[i]
+    def _cache_data(self, data: pd.DataFrame, cache_dir: Optional[str] = None) -> None:
+        quote_datetimes = data.index.get_level_values('quote_datetime').unique()
+        for i, quote_datetime in enumerate(quote_datetimes):
+            data = data.xs(quote_datetime, level='quote_datetime')
             datestr = quote_datetime.strftime("%Y-%m-%d-%H-%M-%S")
-            filepath = os.path.join(cache_dir, f"{type(self).__name__}_{datestr}.{self.return_as}")
-            if self.return_as == 'pt':
-                torch.save(data, filepath)
-            elif self.return_as == 'csv':
-                data.to_csv(filepath)
-            else:
-                raise ValueError(f"Unknown return_as: {self.return_as}")
-    
+            filepath = os.path.join(cache_dir, f"{type(self).__name__}_{datestr}.pt")
+            torch.save(data, filepath)
+
     @property
     def columns(self):
         return ['option_type', 'time_to_maturity', 'log_moneyness', 'implied_volatility', 'bid', 'ask', 'discount_factor', 'underlying_forward']
@@ -200,25 +194,28 @@ class OptionsDataset(Dataset, ABC):
         return df
 
 
-class CBOEOptionsDataset(OptionsDataset):
-    r"""Dataset for S&P 500 Index options data as provided by the CBOE DataShop"""
-
+class SPXOptionsDataset(OptionsDataset):
+    """S&P 500 options dataset."""
+    
     @classmethod
-    def load_data(cls, data_dir: str) -> pd.DataFrame:
-
-        # get the path of the unique csv file in the directory:
-        # warn in case where there are multiple files in the directory   
-
-        csv_files = [file for file in os.listdir(data_dir) if file.endswith('.csv')]
-        if len(csv_files) == 0:
-            raise FileNotFoundError(f"No csv files found in {data_dir}")
-        else:
-            warnings.warn("Loading first file only")
-            filepath = os.path.join(data_dir, csv_files[0])
-
-        data = (pd.read_csv(filepath)
-                  .query('root == "SPX"')
-                  .rename(columns={'expiration': 'expiry_datetime'}))
+    def load_data(cls) -> pd.DataFrame:
         
-        return data
+        data_path = Path(os.environ['OPDS_CBOE_SPX_DATA_DIR'])
+        zip_files = [file for file in os.listdir(data_path) if file.endswith('.zip')]
+
+        usecols = ['root','expiration', 'quote_datetime', 'option_type', 'strike', 'bid', 'ask']
+
+        def read_zip_files(zip_files):
+            for i, f in enumerate(zip_files, start=1):
+                log.info(f"Reading file {i} of {len(zip_files)}")
+                temp_df = pd.read_csv(data_path / f, usecols=usecols)
+                temp_df = temp_df.query('root == "SPX"')
+                yield temp_df
+
+        df = pd.concat(read_zip_files(zip_files), ignore_index=True)
+        log.info("Finished concatenating all files")
+        
+        df = df.rename(columns={'expiration': 'expiry_datetime'})
+        
+        return df
 

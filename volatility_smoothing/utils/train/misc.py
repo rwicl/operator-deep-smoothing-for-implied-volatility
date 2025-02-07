@@ -37,7 +37,7 @@ def create_gno():
 
 
 def load_checkpoint(path: str, device=None):
-    model = create_gno()
+    model = create_gno().to(device)
     optimizer = torch.optim.AdamW(model.parameters())
     checkpoint = torch.load(path, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint['model'])

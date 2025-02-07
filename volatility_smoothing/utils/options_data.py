@@ -131,7 +131,7 @@ class OptionsDataset(Dataset, ABC):
         return len(self.quote_datetimes)
     
     def __getitem__(self, i: int):
-        return torch.load(self.file_paths[i])
+        return torch.load(self.file_paths[i], weights_only=True)
         
     def _get_quote_datetime(self, filepath):
         date_string = str(filepath).split(f'{type(self).__name__}_')[1].split('.')[0]

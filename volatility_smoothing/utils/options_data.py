@@ -244,3 +244,67 @@ class SPXOptionsDataset(OptionsDataset):
         
         return df
 
+
+class WRDSOptionsDataset(OptionsDataset):
+    """Dataset for OptionsMetrics data as provided through the WRDS
+    
+    When downloading the options chain (for a specified index and a certain date range) from WRDS, be sure to include the following fields:
+    
+    * ``date``
+    * ``exdate``
+    * ``cp_flag``
+    * ``strike_price``
+    * ``best_bid``
+    * ``best_offer``
+    * ``am_settlement`` (to be able to discard weekly options)
+    
+    Then, place the generated csv-file into an apposite directory, and provide as ``data_dir`` during init.
+    """
+    
+    @classmethod
+    def load_data(cls) -> pd.DataFrame:
+        """Load the options data contained in the WRDS csv-file
+
+        Parameters
+        ----------
+        data_dir
+            The directory in which the csv-file is placed (must be the only csv-file in this directory)
+
+        Returns
+        -------
+            The data frame with columns as described in the documentation of :meth:`OptionsDataset.load_data`
+
+        Raises
+        ------
+        FileNotFoundError
+            If no csv-file was found in ``data_dir``
+        ValueError
+            If there were multiple csv-files in ``data_dir``
+        """
+
+        data_dir = Path(os.environ['OPDS_WRDS_DATA_DIR'])
+
+        csv_files = [file for file in os.listdir(data_dir) if file.endswith('.csv')]
+        if len(csv_files) == 0:
+            raise FileNotFoundError(f"No csv files found in {data_dir}")
+        elif len(csv_files) > 1:
+            raise ValueError(f"Multiple csv files found in {data_dir}")
+        else:
+            filepath = os.path.join(data_dir, csv_files[0])
+       
+        col_names = {            
+            'date': 'quote_datetime',
+            'exdate': 'expiry_datetime',
+            'strike_price': 'strike',
+            'cp_flag': 'option_type',
+            'best_bid': 'bid',
+            'best_offer': 'ask'
+        }
+        data = (pd.read_csv(filepath, engine='python')
+            .query('am_settlement == 1')
+            .assign(strike_price=lambda df: df['strike_price'] / 1000)
+            .rename(columns=col_names)
+            .astype({'quote_datetime': 'datetime64[ns]', 'expiry_datetime': 'datetime64[ns]'})
+            .get(col_names.values()))
+
+        return data
